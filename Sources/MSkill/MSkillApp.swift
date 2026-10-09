@@ -73,6 +73,13 @@ final class SkillStore: ObservableObject {
         }
     }
 
+    var filteredBrokenLinks: [BrokenLink] {
+        result.brokenLinks.filter { link in
+            (selectedAgentID == nil || link.agentID == selectedAgentID)
+                && (search.isEmpty || link.location.lastPathComponent.localizedCaseInsensitiveContains(search))
+        }
+    }
+
     var selectedSkill: Skill? { result.skills.first { $0.id == selectedSkillID } }
 
     func agent(for id: String) -> Agent? { result.agents.first { $0.id == id } }
@@ -107,11 +114,25 @@ final class SkillStore: ObservableObject {
         refresh()
     }
 
-    func sync(_ skill: Skill, to agent: Agent, replace: Bool = false) {
+    func sync(_ skill: Skill, to agent: Agent, replace: Bool = false, mode: SyncMode = .copy) {
         do {
-            let result = try SkillSyncer().sync(skill, to: agent, replace: replace)
+            let result = try SkillSyncer().sync(skill, to: agent, replace: replace, mode: mode)
             refresh()
-            notice = result.backup == nil ? "已同步到 \(agent.name)" : "已替换 \(agent.name) 中的 Skill，原版本已备份"
+            notice = switch (mode, result.backup == nil) {
+            case (.copy, true): "已同步到 \(agent.name)"
+            case (.copy, false): "已替换 \(agent.name) 中的 Skill，原版本已备份"
+            case (.link, true): "已在 \(agent.name) 中创建链接"
+            case (.link, false): "已将 \(agent.name) 中的 Skill 改为链接，原文件夹已备份"
+            }
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    func removeBrokenLink(_ link: BrokenLink) {
+        do {
+            try SkillSyncer().removeBrokenLink(link)
+            refresh()
         } catch {
             notice = error.localizedDescription
         }
@@ -137,6 +158,7 @@ struct ContentView: View {
     @EnvironmentObject private var store: SkillStore
     @State private var showAddSheet = false
     @State private var pendingConflict: Agent?
+    @AppStorage("MSkill.syncMode") private var syncMode: SyncMode = .copy
 
     var body: some View {
         HStack(spacing: 0) {
@@ -149,11 +171,11 @@ struct ContentView: View {
         .confirmationDialog("发现同名 Skill", isPresented: Binding(get: { pendingConflict != nil }, set: { if !$0 { pendingConflict = nil } })) {
             Button("取消", role: .cancel) { pendingConflict = nil }
             Button("备份并替换", role: .destructive) {
-                if let skill = store.selectedSkill, let agent = pendingConflict { store.sync(skill, to: agent, replace: true) }
+                if let skill = store.selectedSkill, let agent = pendingConflict { store.sync(skill, to: agent, replace: true, mode: syncMode) }
                 pendingConflict = nil
             }
         } message: {
-            Text("目标目录中的内容不同。替换前会把原版本保存到目标目录的 .mskill-backups 文件夹。")
+            Text("目标目录中的内容不同。替换前会把原文件夹保存到目标目录的 .mskill-backups；若原来是软链接，只替换链接本身。")
         }
         .alert("操作结果", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("好的") { store.notice = nil }
@@ -304,7 +326,7 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.black.opacity(0.07)))
             .padding(.horizontal, 25).padding(.top, 20).padding(.bottom, 13)
 
-            if store.filteredSkills.isEmpty {
+            if store.filteredSkills.isEmpty && store.filteredBrokenLinks.isEmpty {
                 ContentUnavailableView(store.search.isEmpty ? "还没有发现 Skill" : "没有匹配的 Skill",
                                        systemImage: "square.stack.3d.up.slash",
                                        description: Text(store.search.isEmpty ? "检查 Agent 的 Skill 目录，或添加自定义路径。" : "试试其他搜索词。"))
@@ -312,6 +334,9 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 7) {
+                        ForEach(store.filteredBrokenLinks) { link in
+                            brokenLinkRow(link)
+                        }
                         ForEach(store.filteredSkills) { skill in
                             skillRow(skill)
                         }
@@ -335,9 +360,16 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(skill.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink).lineLimit(1)
                     Text(skill.summary).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(2)
-                    Text(agent?.name ?? skill.agentID)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Palette.accent)
+                    HStack(spacing: 6) {
+                        Text(agent?.name ?? skill.agentID)
+                        if skill.linkTarget != nil {
+                            Label("链接", systemImage: "link").labelStyle(.titleAndIcon)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Palette.pale, in: Capsule())
+                        }
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Palette.accent)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.muted.opacity(0.7))
@@ -349,6 +381,32 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Palette.accent.opacity(0.3) : Color.black.opacity(0.055)))
         }
         .buttonStyle(.plain)
+    }
+
+    private func brokenLinkRow(_ link: BrokenLink) -> some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: "link.badge.plus")
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.orange)
+                .frame(width: 35, height: 35)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(link.location.lastPathComponent).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink).lineLimit(1)
+                Text("链接已失效 → \(link.destination)").font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(2)
+                Text(store.agent(for: link.agentID)?.name ?? link.agentID)
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(.orange)
+            }
+            Spacer(minLength: 0)
+            Button("移除链接") { store.removeBrokenLink(link) }
+                .font(.system(size: 10, weight: .semibold))
+                .buttonStyle(.bordered)
+                .help("只删除这个软链接，不会删除任何文件夹")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(13)
+        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.3)))
     }
 
     @ViewBuilder
@@ -375,8 +433,17 @@ struct ContentView: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(Palette.muted)
                     .padding(.top, 20)
+                    if let linkTarget = skill.linkTarget {
+                        HStack(spacing: 6) {
+                            Image(systemName: "link")
+                            Text(linkTarget.path).lineLimit(2).textSelection(.enabled)
+                        }
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Palette.accent)
+                        .padding(.top, 6)
+                    }
                     Button("在 Finder 中显示", systemImage: "arrow.up.forward.app") {
-                        NSWorkspace.shared.activateFileViewerSelecting([skill.directory])
+                        NSWorkspace.shared.activateFileViewerSelecting([skill.linkTarget ?? skill.directory])
                     }
                     .font(.system(size: 11, weight: .medium))
                     .buttonStyle(.link)
@@ -386,10 +453,20 @@ struct ContentView: View {
                     Text("同步到其他 Agent")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(Palette.ink)
-                    Text("将整个 Skill 文件夹复制到目标目录。")
+                    Picker("同步方式", selection: $syncMode) {
+                        Text("复制").tag(SyncMode.copy)
+                        Text("链接").tag(SyncMode.link)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.top, 10)
+                    Text(syncMode == .copy
+                         ? "复制整个文件夹。之后修改源 Skill，需要再次同步。"
+                         : "创建指向源文件夹的软链接，修改即时生效。源文件夹被删除或移动后，链接会失效。")
                         .font(.system(size: 11))
                         .foregroundStyle(Palette.muted)
-                        .padding(.top, 5).padding(.bottom, 16)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 7).padding(.bottom, 16)
                     ForEach(store.result.agents.filter { $0.id != skill.agentID }) { agent in
                         targetRow(skill: skill, agent: agent)
                     }
@@ -423,16 +500,16 @@ struct ContentView: View {
                     .font(.system(size: 10)).foregroundStyle(Palette.muted)
             }
             Spacer(minLength: 0)
-            if agent.installed && state != .identical {
-                Button(state == .conflict ? "替换" : "同步") {
+            if let title = actionTitle(state, installed: agent.installed) {
+                Button(title) {
                     if state == .conflict { pendingConflict = agent }
-                    else { store.sync(skill, to: agent) }
+                    else { store.sync(skill, to: agent, mode: syncMode) }
                 }
                 .font(.system(size: 10, weight: .semibold))
                 .buttonStyle(.bordered)
-                .tint(Palette.accent)
-            } else if state == .identical {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.accent)
+                .tint(state == .brokenLink ? .orange : Palette.accent)
+            } else if state == .identical || state == .linked {
+                Image(systemName: state == .linked ? "link.circle.fill" : "checkmark.circle.fill").foregroundStyle(Palette.accent)
             }
         }
         .padding(.vertical, 10)
@@ -445,7 +522,22 @@ struct ContentView: View {
         case .unavailable: "目录不可用"
         case .missing: "尚未安装"
         case .identical: "已同步"
+        case .linked: "已链接"
+        case .brokenLink: "链接已失效"
         case .conflict: "内容不同"
+        }
+    }
+
+    /// 返回 nil 表示不显示按钮。复制模式下内容相同即无需操作；链接模式下可把相同的副本改为链接。
+    private func actionTitle(_ state: SyncState, installed: Bool) -> String? {
+        guard installed else { return nil }
+        return switch (state, syncMode) {
+        case (.unavailable, _), (.linked, _), (.identical, .copy): nil
+        case (.identical, .link): "改为链接"
+        case (.brokenLink, _): "修复"
+        case (.conflict, _): "替换"
+        case (.missing, .copy): "同步"
+        case (.missing, .link): "链接"
         }
     }
 }

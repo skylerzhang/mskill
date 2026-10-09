@@ -133,4 +133,96 @@ struct SkillCoreTests {
         #expect(agent.applicationURL == nil)
         #expect(agent.symbol == "cursorarrow.rays")
     }
+
+    @Test func scanFollowsSymlinkedSkillsAndReportsBrokenLinks() throws {
+        let temp = try workspace()
+        defer { try? fm.removeItem(at: temp) }
+        let library = temp.appending(path: "library")
+        let source = try makeSkill(at: library, folder: "writer", body: "---\nname: Writer\n---")
+        let root = temp.appending(path: ".cursor/skills")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: root.appending(path: "writer"), withDestinationURL: source)
+        try fm.createSymbolicLink(atPath: root.appending(path: "gone").path, withDestinationPath: library.appending(path: "gone").path)
+        let definitions = AgentDefinition.known.filter { $0.id == "cursor" }
+
+        let result = SkillScanner(home: temp, applications: temp, definitions: definitions).scan()
+        let skill = try #require(result.skills.first)
+        #expect(result.skills.count == 1)
+        #expect(skill.name == "Writer")
+        #expect(skill.linkTarget?.path == source.realFileURL.path)
+        #expect(skill.fingerprint == SkillScanner.fingerprint(of: source))
+        #expect(result.brokenLinks.map(\.location.lastPathComponent) == ["gone"])
+    }
+
+    @Test func linkModeCreatesSymlinkThatTracksSource() throws {
+        let temp = try workspace()
+        defer { try? fm.removeItem(at: temp) }
+        let source = try makeSkill(at: temp.appending(path: "source"), folder: "helper", body: "# Help")
+        let targetRoot = temp.appending(path: "target")
+        let skill = Skill(id: "helper", agentID: "source", folderName: "helper", name: "Helper", summary: "",
+                          directory: source, fingerprint: SkillScanner.fingerprint(of: source))
+        let target = Agent(id: "target", name: "Target", symbol: "folder", roots: [targetRoot], installed: true, isCustom: true)
+        let syncer = SkillSyncer()
+
+        let result = try syncer.sync(skill, to: target, mode: .link)
+        #expect(try fm.destinationOfSymbolicLink(atPath: result.destination.path) == source.realFileURL.path)
+        #expect(syncer.state(for: skill, target: target) == .linked)
+        try "# Updated".write(to: source.appending(path: "SKILL.md"), atomically: true, encoding: .utf8)
+        #expect(try String(contentsOf: result.destination.appending(path: "SKILL.md"), encoding: .utf8) == "# Updated")
+        #expect(try syncer.sync(skill, to: target, mode: .link).backup == nil)
+        #expect(try syncer.sync(skill, to: target, mode: .copy).backup == nil)
+        #expect(syncer.state(for: skill, target: target) == .linked)
+    }
+
+    @Test func linkModeBacksUpRealFolderAndCopyModeCopiesThroughLink() throws {
+        let temp = try workspace()
+        defer { try? fm.removeItem(at: temp) }
+        let source = try makeSkill(at: temp.appending(path: "source"), folder: "writer", body: "# Same")
+        let targetRoot = temp.appending(path: "target")
+        _ = try makeSkill(at: targetRoot, folder: "writer", body: "# Same")
+        let skill = Skill(id: "writer", agentID: "source", folderName: "writer", name: "Writer", summary: "",
+                          directory: source, fingerprint: SkillScanner.fingerprint(of: source))
+        let target = Agent(id: "target", name: "Target", symbol: "folder", roots: [targetRoot], installed: true, isCustom: true)
+        let syncer = SkillSyncer()
+
+        #expect(syncer.state(for: skill, target: target) == .identical)
+        let linked = try syncer.sync(skill, to: target, mode: .link)
+        #expect(linked.backup != nil)
+        #expect(syncer.state(for: skill, target: target) == .linked)
+
+        let linkedSkill = Skill(id: "linked", agentID: "target", folderName: "writer", name: "Writer", summary: "",
+                                directory: linked.destination, fingerprint: skill.fingerprint)
+        let other = Agent(id: "other", name: "Other", symbol: "folder", roots: [temp.appending(path: "other")], installed: true, isCustom: true)
+        let copied = try syncer.sync(linkedSkill, to: other, mode: .copy)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: copied.destination.path)) == nil)
+        #expect(fm.fileExists(atPath: copied.destination.appending(path: "SKILL.md").path))
+    }
+
+    @Test func brokenLinkIsRepairedAndRemovedSafely() throws {
+        let temp = try workspace()
+        defer { try? fm.removeItem(at: temp) }
+        let source = try makeSkill(at: temp.appending(path: "source"), folder: "helper", body: "# Help")
+        let targetRoot = temp.appending(path: "target")
+        try fm.createDirectory(at: targetRoot, withIntermediateDirectories: true)
+        let dangling = targetRoot.appending(path: "helper")
+        try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: temp.appending(path: "missing").path)
+        let skill = Skill(id: "helper", agentID: "source", folderName: "helper", name: "Helper", summary: "",
+                          directory: source, fingerprint: SkillScanner.fingerprint(of: source))
+        let target = Agent(id: "target", name: "Target", symbol: "folder", roots: [targetRoot], installed: true, isCustom: true)
+        let syncer = SkillSyncer()
+
+        #expect(syncer.state(for: skill, target: target) == .brokenLink)
+        _ = try syncer.sync(skill, to: target, mode: .copy)
+        #expect(syncer.state(for: skill, target: target) == .identical)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: dangling.path)) == nil)
+
+        let realFolder = BrokenLink(agentID: "target", location: dangling, destination: "")
+        #expect(throws: SkillError.self) { try syncer.removeBrokenLink(realFolder) }
+        #expect(fm.fileExists(atPath: dangling.appending(path: "SKILL.md").path))
+
+        let orphan = targetRoot.appending(path: "orphan")
+        try fm.createSymbolicLink(atPath: orphan.path, withDestinationPath: temp.appending(path: "nowhere").path)
+        try syncer.removeBrokenLink(BrokenLink(agentID: "target", location: orphan, destination: ""))
+        #expect((try? fm.destinationOfSymbolicLink(atPath: orphan.path)) == nil)
+    }
 }

@@ -10,6 +10,7 @@
 - 添加任意自定义 Skill 目录，支持扫描其中的嵌套文件夹。
 - 将 Skill 复制到其他已检测到的客户端；相同内容显示“已同步”。
 - 同名内容冲突时先确认，替换前备份原文件夹到目标目录的 `.mskill-backups`。
+- 同步方式可选“复制”或“链接”：链接模式在目标目录创建指向源文件夹的软链接，源 Skill 修改后各处即时生效。扫描时识别软链接形式的 Skill，并列出失效链接供修复或移除。
 
 ## 运行
 
@@ -38,6 +39,6 @@ swift scripts/prepare-app-icon.swift design/icon-options/04-skill-stack.png Sour
 
 ## 说明
 
-MSkill 只扫描本地文件，不连接账号或云服务。自动检测覆盖内置列表中的常见目录；客户端使用不同路径时可通过“添加自定义路径”接入。同步使用文件夹复制，因此后续源目录修改后，需要再次同步。应用首次读取受 macOS 隐私保护的目录时，系统可能要求授予文件访问权限。
+MSkill 只扫描本地文件，不连接账号或云服务。自动检测覆盖内置列表中的常见目录；客户端使用不同路径时可通过“添加自定义路径”接入。“复制”模式下，后续源目录修改后需要再次同步；“链接”模式无需再次同步，但源文件夹被删除或移动后链接会失效，部分 Agent 也可能不跟随软链接，使用前请先实测。应用首次读取受 macOS 隐私保护的目录时，系统可能要求授予文件访问权限。
 
 当前自动发现面向用户级 Skill 目录。项目内的 `.cursor/skills`、`.claude/skills` 等路径可以通过“添加自定义路径”接入。内置目录参考了 [Cursor](https://cursor.com/help/customization/skills)、[Gemini CLI](https://geminicli.com/docs/cli/creating-skills/)、[OpenCode](https://docs.opencode.ai/docs/skills/) 和 [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/add-skills) 的文档。
