@@ -63,18 +63,55 @@ struct Skill: Identifiable, Hashable, Sendable {
     let summary: String
     let directory: URL
     let fingerprint: String
+    var linkTarget: URL? = nil
+}
+
+struct BrokenLink: Identifiable, Hashable, Sendable {
+    let agentID: String
+    let location: URL
+    let destination: String
+
+    var id: String { "\(agentID):\(location.path)" }
 }
 
 struct ScanResult: Sendable {
     let agents: [Agent]
     let skills: [Skill]
+    var brokenLinks: [BrokenLink] = []
+}
+
+enum SyncMode: String, CaseIterable, Sendable {
+    case copy
+    case link
 }
 
 enum SyncState: Equatable {
     case unavailable
     case missing
     case identical
+    case linked
+    case brokenLink
     case conflict
+}
+
+extension URL {
+    /// 解析所有软链接后的真实路径；与 resolvingSymlinksInPath 不同，不会去掉 /private 前缀。
+    var realFileURL: URL {
+        guard let resolved = realpath(path, nil) else { return standardizedFileURL }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved))
+    }
+}
+
+private enum LinkStatus: Equatable {
+    case none
+    case dangling
+    case resolved(URL)
+
+    init(at url: URL, fileManager: FileManager) {
+        guard (try? fileManager.destinationOfSymbolicLink(atPath: url.path)) != nil else { self = .none; return }
+        self = fileManager.fileExists(atPath: url.path) ? .resolved(url.realFileURL) : .dangling
+    }
 }
 
 struct SyncResult {
@@ -87,6 +124,7 @@ enum SkillError: LocalizedError {
     case unavailableTarget
     case conflict
     case sameLocation
+    case notBrokenLink
 
     var errorDescription: String? {
         switch self {
@@ -94,6 +132,7 @@ enum SkillError: LocalizedError {
         case .unavailableTarget: "目标 Agent 没有可用的 Skill 目录。"
         case .conflict: "目标已有不同内容的同名 Skill。"
         case .sameLocation: "源目录与目标目录相同。"
+        case .notBrokenLink: "该路径不是失效的软链接，未做任何改动。"
         }
     }
 }
@@ -137,14 +176,17 @@ struct SkillScanner {
                                 roots: [root], installed: fileManager.fileExists(atPath: root.path), isCustom: true,
                                 applicationURL: applicationURL(named: [custom.name + ".app"], in: localApplications)))
         }
-        let knownRoots = Set(agents.flatMap(\.roots).map { $0.standardizedFileURL.path })
+        let knownRoots = Set(agents.flatMap(\.roots).flatMap { [$0.standardizedFileURL.path, $0.realFileURL.path] })
         agents.append(contentsOf: discoverOtherAgents(excluding: knownRoots).map { agent in
             var agent = agent
             agent.applicationURL = applicationURL(named: [agent.name + ".app"], in: localApplications)
             return agent
         })
-        let skills = agents.flatMap { agent in agent.roots.flatMap { scanRoot($0, agentID: agent.id) } }
-        return ScanResult(agents: agents, skills: skills.sorted { ($0.name.localizedLowercase, $0.agentID) < ($1.name.localizedLowercase, $1.agentID) })
+        let scanned = agents.flatMap { agent in agent.roots.map { scanRoot($0, agentID: agent.id) } }
+        let skills = scanned.flatMap(\.skills)
+        return ScanResult(agents: agents,
+                          skills: skills.sorted { ($0.name.localizedLowercase, $0.agentID) < ($1.name.localizedLowercase, $1.agentID) },
+                          brokenLinks: scanned.flatMap(\.brokenLinks).sorted { $0.location.path < $1.location.path })
     }
 
     private func applicationURLs() -> [URL] {
@@ -187,12 +229,15 @@ struct SkillScanner {
             guard depth <= limit,
                   let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return }
             for entry in entries {
-                guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
                 let component = entry.lastPathComponent
                 if component.lowercased() == "skills" {
-                    candidates.insert(entry.standardizedFileURL)
+                    if values?.isDirectory == true || (values?.isSymbolicLink == true && isDirectory(entry)) {
+                        candidates.insert(entry.standardizedFileURL)
+                    }
                     continue
                 }
+                guard values?.isDirectory == true else { continue }
                 guard depth < limit,
                       ![".cache", ".git", "node_modules", ".build", "Caches", "Extensions", "plugins"].contains(component),
                       !component.hasPrefix(".mskill-") else { continue }
@@ -203,11 +248,16 @@ struct SkillScanner {
         for (base, limit) in bases {
             search(base, depth: 0, limit: limit, homeBase: base == home)
         }
+        var seenRoots = knownRoots
         return candidates
-            .filter { !knownRoots.contains($0.path) }
             .sorted { $0.path < $1.path }
+            .filter { root in
+                guard !seenRoots.contains(root.path), !seenRoots.contains(root.realFileURL.path) else { return false }
+                seenRoots.insert(root.realFileURL.path)
+                return true
+            }
             .compactMap { root in
-                guard !scanRoot(root, agentID: "probe").isEmpty else { return nil }
+                guard !scanRoot(root, agentID: "probe").skills.isEmpty else { return nil }
                 let rawName = root.deletingLastPathComponent().lastPathComponent
                 let name = rawName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
                     .replacingOccurrences(of: "-", with: " ")
@@ -218,31 +268,51 @@ struct SkillScanner {
             }
     }
 
-    private func scanRoot(_ root: URL, agentID: String) -> [Skill] {
-        guard fileManager.fileExists(atPath: root.path) else { return [] }
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    private func scanRoot(_ root: URL, agentID: String) -> (skills: [Skill], brokenLinks: [BrokenLink]) {
+        guard fileManager.fileExists(atPath: root.path) else { return ([], []) }
         var found: [Skill] = []
+        var broken: [BrokenLink] = []
         var visited: Set<String> = []
         func walk(_ directory: URL, depth: Int) {
-            guard depth <= 4, !visited.contains(directory.resolvingSymlinksInPath().path) else { return }
-            visited.insert(directory.resolvingSymlinksInPath().path)
-            guard let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return }
+            guard depth <= 4, !visited.contains(directory.realFileURL.path) else { return }
+            visited.insert(directory.realFileURL.path)
+            guard let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: []) else { return }
             for entry in entries {
                 guard ![".git", "node_modules", "dist", "build", ".mskill-backups"].contains(entry.lastPathComponent),
-                      (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                      !entry.lastPathComponent.hasPrefix(".mskill-staging-") else { continue }
+                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                var linkTarget: URL?
+                switch LinkStatus(at: entry, fileManager: fileManager) {
+                case .dangling:
+                    broken.append(.init(agentID: agentID, location: entry,
+                                        destination: (try? fileManager.destinationOfSymbolicLink(atPath: entry.path)) ?? ""))
+                    continue
+                case .resolved(let target):
+                    guard isDirectory(target) else { continue }
+                    linkTarget = target
+                case .none:
+                    guard values?.isDirectory == true else { continue }
+                }
                 let manifest = entry.appending(path: "SKILL.md")
                 if fileManager.fileExists(atPath: manifest.path) {
                     let metadata = Self.metadata(at: manifest, fallback: entry.lastPathComponent)
                     found.append(.init(id: "\(agentID):\(entry.standardizedFileURL.path)", agentID: agentID,
                                        folderName: entry.lastPathComponent, name: metadata.name,
                                        summary: metadata.summary, directory: entry,
-                                       fingerprint: Self.fingerprint(of: entry, fileManager: fileManager)))
+                                       fingerprint: Self.fingerprint(of: entry, fileManager: fileManager),
+                                       linkTarget: linkTarget))
                 } else {
                     walk(entry, depth: depth + 1)
                 }
             }
         }
         walk(root, depth: 0)
-        return found
+        return (found, broken)
     }
 
     private static func metadata(at url: URL, fallback: String) -> (name: String, summary: String) {
@@ -268,6 +338,7 @@ struct SkillScanner {
     }
 
     static func fingerprint(of directory: URL, fileManager: FileManager = .default) -> String {
+        let directory = directory.realFileURL
         var hasher = SHA256()
         let rootPath = directory.standardizedFileURL.path
         guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return "" }
@@ -299,32 +370,49 @@ struct SkillSyncer {
 
     func state(for skill: Skill, target: Agent) -> SyncState {
         guard let root = target.primaryRoot else { return .unavailable }
-        let destination = root.appending(path: skill.folderName, directoryHint: .isDirectory)
-        if destination.standardizedFileURL == skill.directory.standardizedFileURL { return .identical }
+        let destination = root.appending(path: skill.folderName, directoryHint: .notDirectory)
+        if destination.standardizedFileURL.path == skill.directory.standardizedFileURL.path { return .identical }
+        switch LinkStatus(at: destination, fileManager: fileManager) {
+        case .dangling: return .brokenLink
+        case .resolved(let url) where url.path == skill.directory.realFileURL.path: return .linked
+        case .resolved, .none: break
+        }
         guard fileManager.fileExists(atPath: destination.path) else { return .missing }
         return SkillScanner.fingerprint(of: destination, fileManager: fileManager) == skill.fingerprint ? .identical : .conflict
     }
 
-    func sync(_ skill: Skill, to target: Agent, replace: Bool = false) throws -> SyncResult {
-        guard fileManager.fileExists(atPath: skill.directory.appending(path: "SKILL.md").path) else { throw SkillError.invalidSource }
+    /// 复制模式写入独立副本；链接模式在目标目录创建指向源真实路径的软链接。
+    /// 目标中的实体文件夹被替换前总会移入 .mskill-backups；软链接本身不含数据，直接替换。
+    func sync(_ skill: Skill, to target: Agent, replace: Bool = false, mode: SyncMode = .copy) throws -> SyncResult {
+        let source = skill.directory.realFileURL
+        guard fileManager.fileExists(atPath: source.appending(path: "SKILL.md").path) else { throw SkillError.invalidSource }
         guard let root = target.primaryRoot else { throw SkillError.unavailableTarget }
-        let destination = root.appending(path: skill.folderName, directoryHint: .isDirectory)
-        let sourcePath = skill.directory.resolvingSymlinksInPath().standardizedFileURL.path
-        let destinationPath = destination.resolvingSymlinksInPath().standardizedFileURL.path
-        guard destinationPath != sourcePath, !destinationPath.hasPrefix(sourcePath + "/") else { throw SkillError.sameLocation }
+        // 不带结尾斜杠：对软链接做 remove/move 时，带斜杠的路径会被解析成链接指向的目录。
+        let destination = root.appending(path: skill.folderName, directoryHint: .notDirectory)
+        let link = LinkStatus(at: destination, fileManager: fileManager)
+        if link == .resolved(source) { return SyncResult(destination: destination, backup: nil) }
+        let destinationPath = root.realFileURL.appending(path: skill.folderName).path
+        guard destinationPath != source.path, !destinationPath.hasPrefix(source.path + "/") else { throw SkillError.sameLocation }
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        let existing = fileManager.fileExists(atPath: destination.path)
-        let currentFingerprint = SkillScanner.fingerprint(of: skill.directory, fileManager: fileManager)
-        if existing && SkillScanner.fingerprint(of: destination, fileManager: fileManager) == currentFingerprint {
-            return SyncResult(destination: destination, backup: nil)
-        }
-        if existing && !replace { throw SkillError.conflict }
 
-        let staging = root.appending(path: ".mskill-staging-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try fileManager.copyItem(at: skill.directory, to: staging)
+        let existing = fileManager.fileExists(atPath: destination.path)
+        let identical = existing && SkillScanner.fingerprint(of: destination, fileManager: fileManager)
+            == SkillScanner.fingerprint(of: source, fileManager: fileManager)
+        if identical && mode == .copy { return SyncResult(destination: destination, backup: nil) }
+        if existing && !identical && !replace { throw SkillError.conflict }
+
+        let staging = root.appending(path: ".mskill-staging-\(UUID().uuidString)", directoryHint: .notDirectory)
+        switch mode {
+        case .copy: try fileManager.copyItem(at: source, to: staging)
+        case .link: try fileManager.createSymbolicLink(at: staging, withDestinationURL: source)
+        }
         var backup: URL?
+        var removedLink: String?
         do {
-            if existing {
+            if link != .none {
+                removedLink = try fileManager.destinationOfSymbolicLink(atPath: destination.path)
+                try fileManager.removeItem(atPath: destination.path)
+            } else if existing {
                 let backupRoot = root.appending(path: ".mskill-backups", directoryHint: .isDirectory)
                 try fileManager.createDirectory(at: backupRoot, withIntermediateDirectories: true)
                 let backupURL = backupRoot.appending(path: "\(skill.folderName)-\(ISO8601DateFormatter().string(from: Date()))-\(UUID().uuidString.prefix(6))")
@@ -333,12 +421,19 @@ struct SkillSyncer {
             }
             try fileManager.moveItem(at: staging, to: destination)
         } catch {
-            if let backup, !fileManager.fileExists(atPath: destination.path) {
-                try? fileManager.moveItem(at: backup, to: destination)
+            if !fileManager.fileExists(atPath: destination.path) {
+                if let backup { try? fileManager.moveItem(at: backup, to: destination) }
+                if let removedLink { try? fileManager.createSymbolicLink(atPath: destination.path, withDestinationPath: removedLink) }
             }
-            try? fileManager.removeItem(at: staging)
+            try? fileManager.removeItem(atPath: staging.path)
             throw error
         }
         return SyncResult(destination: destination, backup: backup)
+    }
+
+    /// 只删除失效的软链接本身；路径若是实体文件或仍然有效的链接则拒绝操作。
+    func removeBrokenLink(_ link: BrokenLink) throws {
+        guard LinkStatus(at: link.location, fileManager: fileManager) == .dangling else { throw SkillError.notBrokenLink }
+        try fileManager.removeItem(atPath: link.location.path)
     }
 }
