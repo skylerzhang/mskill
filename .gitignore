@@ -1,0 +1,43 @@
+# Swift / Xcode build output and local state
+.build/
+.swiftpm/
+build/
+dist/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# macOS metadata
+.DS_Store
+._*
+.AppleDouble/
+.LSOverride
+
+# Local environment files (keep sanitized examples in Git)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Private keys, signing credentials, and provisioning profiles
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+id_rsa
+id_ed25519
+
+# Local Skill backups and temporary copies
+.mskill-backups/
+.mskill-staging-*/
+
+# Editor caches, temporary files, and logs
+.idea/
+*.swp
+*.swo
+*~
+*.log

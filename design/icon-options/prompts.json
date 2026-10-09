@@ -1,0 +1,21 @@
+{
+  "tool": "built-in image_gen",
+  "variants": [
+    {
+      "id": "01-modular-m",
+      "prompt": "Use case: logo-brand. Asset type: macOS application icon for MSkill, a local tool that organizes AI agent skills and copies them between agents. Create ONE polished standalone square icon, centered, front-facing, filling 88% of a square canvas, with a rounded-square macOS app tile and clean consistent inset margins. It must remain legible at 32px: large bold silhouette, few elements, no thin lines. Premium restrained macOS aesthetic, subtle dimensionality, crisp edges. No words, no labels, no watermark, no mockup scene, no device, no grid, no multiple proposals. Direction: a distinctive geometric capital M built from three interlocking skill modules, the interlocking joints subtly suggest reusable building blocks. Deep indigo rounded square tile, soft violet and lavender modular symbol with a small warm highlight at one junction. Sculpted satin material with shallow bevels and tasteful shadow. Strong recognizable M shape; simple and sophisticated."
+    },
+    {
+      "id": "02-skill-folder",
+      "prompt": "Use case: logo-brand. Asset type: macOS application icon for MSkill, a local tool that organizes AI agent skills and copies them between agents. Create ONE polished standalone square icon, centered, front-facing, filling 88% of a square canvas, with a rounded-square macOS app tile and clean consistent inset margins. It must remain legible at 32px: large bold silhouette, few elements, no thin lines. Premium restrained macOS aesthetic, subtle dimensionality, crisp edges. No words, no labels, no watermark, no mockup scene, no device, no grid, no multiple proposals. Direction: one bold abstract skill folder with a small four-point spark integrated as a cutout in its front face. The folder is softly dimensional, friendly but professional, and evokes organizing a local library of capabilities. Very pale mint rounded-square tile, rich teal folder, small mint luminous accent in the cutout. A single folder, no documents poking out, no busy symbols. Soft matte finish and gently rounded corners."
+    },
+    {
+      "id": "03-sync-orbit",
+      "prompt": "Use case: logo-brand. Asset type: macOS application icon for MSkill, a local tool that organizes AI agent skills and copies them between agents. Create ONE polished standalone square icon, centered, front-facing, filling 88% of a square canvas, with a rounded-square macOS app tile and clean consistent inset margins. It must remain legible at 32px: large bold silhouette, few elements, no thin lines. Premium restrained macOS aesthetic, subtle dimensionality, crisp edges. No words, no labels, no watermark, no mockup scene, no device, no grid, no multiple proposals. Direction: a bold continuous rounded loop made from two broad interlocking directional segments, encircling a single small rounded diamond skill module. The circle communicates sharing reusable skills between agents. Warm ivory rounded-square tile, vibrant coral and orange loop, dark warm center diamond. Refined soft enamel, minimal shallow 3D, generous negative space. No thin orbital lines, no extra satellites, no globe."
+    },
+    {
+      "id": "04-skill-stack",
+      "prompt": "Use case: logo-brand. Asset type: macOS application icon for MSkill, a local tool that organizes AI agent skills and copies them between agents. Create ONE polished standalone square icon, centered, front-facing, filling 88% of a square canvas, with a rounded-square macOS app tile and clean consistent inset margins. It must remain legible at 32px: large bold silhouette, few elements, no thin lines. Premium restrained macOS aesthetic, subtle dimensionality, crisp edges. No words, no labels, no watermark, no mockup scene, no device, no grid, no multiple proposals. Direction: three compact overlapping rounded-square skill cards arranged as a very simple stepped stack; the foremost dark cobalt card has one crisp geometric white lightning-shaped notch integrated into its surface, evoking an executable capability. Frosted pale blue rounded-square tile, two rear cards in sky blue and periwinkle, front card rich cobalt. Subtle depth, low-relief glass-like sheen without transparency clutter. Clear strong silhouette; no text or ornamental details."
+    }
+  ]
+}
